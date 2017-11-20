@@ -11,21 +11,46 @@ class FeatureExtractor:
     def __init__(self):
         self._current_id = 0
         self.rows = []
+    def extract_features(self, filename):
+        color_img = cv2.imread(filename,1)
+        original = cv2.imread(filename,1)
+        parts, out, bounded_boxes = calculate_bounding_boxes(original)
+
+        objects = []
+
+        for part in parts:
+            bin_img = get_subimage(out, part)
+            features = extract_features(bin_img)
+            objects.append({
+                'id': self._current_id,
+                'x': part[0],
+                'y': part[1],
+                'w': part[2],
+                'h': part[3],
+                'features': features,
+                'label': 'UNKNOWN'
+            })
+            self._current_id += 1
+
+        return objects, color_img
+
+
     def collect_feature_data(self, filename, **kwargs):
         output_dir = kwargs['output'] if 'output' in kwargs else None
 
         original = cv2.imread(filename,1)
-        parts, bounded_boxes = calculate_bounding_boxes(original)
+        parts, out, bounded_boxes = calculate_bounding_boxes(original)
 
         for part in parts:
-            img = get_subimage(original, part)
-            features = extract_features(img)
+            color_img = get_subimage(original, part)
+            bin_img = get_subimage(out, part)
+            features = extract_features(bin_img)
             if output_dir:
                 filename = output_dir+str(self._current_id)+'.png'
-                cv2.imwrite(filename, img)
+                cv2.imwrite(filename, color_img)
             else:
                 filename = ''
-            self.rows.append([self._current_id,img.shape[1],img.shape[0],*features,filename,'NONE'])
+            self.rows.append([self._current_id,part[0],part[1],bin_img.shape[1],bin_img.shape[0],*features,filename,'NONE'])
             print("Found Number of Objects",len(self.rows))
             self._current_id += 1
 
@@ -40,19 +65,18 @@ def extract_features(img):
 def calculate_bounding_boxes(img):
     gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Applying Morphilogical Gradient
-    gradient = cv2.morphologyEx(gray_image, cv2.MORPH_GRADIENT, KERNEL_5x5)
+    small_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(15,15))
+    med_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
 
-    # Closing Image
-    closing = cv2.morphologyEx(gradient, cv2.MORPH_CLOSE, KERNEL_9x9)
+    gradient = cv2.morphologyEx(gray_image, cv2.MORPH_GRADIENT, small_kernel)
 
-    # Thresholding
-    ret,thresh1 = cv2.threshold(closing,35,255,cv2.THRESH_BINARY)
+    ret2,out = cv2.threshold(gradient,50,255,cv2.THRESH_BINARY)
 
-    # Calculating Bounding Boxes
-    rects, contours, h = cv2.findContours(thresh1, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = cv2.dilate(out,med_kernel,iterations=1)
 
-    MIN_AREA = 0.005
+    rects, contours, h = cv2.findContours(out, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    MIN_AREA = 0.001
     MAX_AREA = 0.9
 
     parts = []
@@ -68,18 +92,16 @@ def calculate_bounding_boxes(img):
             parts.append(tuple([x,y,w,h]))
             found_parts_img = cv2.rectangle(found_parts_img,(x,y),(x+w,y+h),(0,255,0),10)
 
-    return parts, found_parts_img
+    return parts, out, found_parts_img
 
 def get_subimage(img, bounding_box):
     x,y,w,h = bounding_box
     return img[y:y+h, x:x+w]
 
 def extract_area_ratio(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret,thr = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-    pixels_object = np.count_nonzero(thr)
-    pixels_box = thr.shape[0]*thr.shape[1]
-    return (pixels_object / pixels_box), thr
+    pixels_object = np.count_nonzero(img)
+    pixels_box = img.shape[0]*img.shape[1]
+    return (pixels_object / pixels_box), img
 
 def extract_box_scale(img):
     height = float(img.shape[0])
@@ -90,21 +112,12 @@ def extract_box_scale(img):
         return height/float(width), img
 
 def extract_total_corners(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret,thr = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-    thr = np.float32(thr)
-    closing = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, np.ones((9,9),np.uint8))
-    dst = cv2.cornerHarris(closing, 2, 3, 0.05)
+    dst = cv2.cornerHarris(img, 2, 3, 0.05)
     number_of_corners = np.count_nonzero(dst[dst>0.03*dst.max()])
-    dst = cv2.dilate(dst,None)
-    corner_img = img.copy()
-    corner_img[dst>0.03*dst.max()]=[0,0,255]
-    return number_of_corners, corner_img
+    return number_of_corners, img
 
 def extract_circularity_error(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret,thr = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-    b, object_conts, h = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    b, object_conts, h = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     contour_areas = [cv2.contourArea(object_conts[i]) for i in range(len(object_conts))]
     max_contour_idx = np.argmax(contour_areas)
@@ -114,22 +127,14 @@ def extract_circularity_error(img):
     area_circle = np.pi * radius**2
 
     circularity_error = abs(area_object - area_circle) / ((2*radius)**2)
-
-    shape_img = img.copy()
-    cv2.drawContours(shape_img,[object_conts[max_contour_idx]],-1,(0,255,0),3)
-    return circularity_error, shape_img
+    return circularity_error, img
 
 def extract_perimeter_norm(img):
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret,thr = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-    b, object_conts, h = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    b, object_conts, h = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     contour_perimeters = [cv2.arcLength(object_conts[i],True) for i in range(len(object_conts))]
     max_contour_idx = np.argmax(contour_perimeters)
 
     perimeter_object = contour_perimeters[max_contour_idx]
     perimeter_norm = perimeter_object / (2.0*img.shape[0] + 2.0*img.shape[1])
-
-    shape_img = img.copy()
-    cv2.drawContours(shape_img,[object_conts[max_contour_idx]],-1,(0,255,0),3)
-    return perimeter_norm, shape_img
+    return perimeter_norm, img

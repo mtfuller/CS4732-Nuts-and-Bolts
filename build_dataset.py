@@ -19,7 +19,7 @@ for img in images:
 
 with open(OUTPUT_DIR+'data.csv','w') as f:
     writer=csv.writer(f)
-    writer.writerow(['id','width','height','area_ratio','box_scale','total_corners','error','perimeter','file','label'])
+    writer.writerow(['id','x','y','width','height','area_ratio','box_scale','total_corners','error','perimeter','file','label'])
     for row in ext.rows:
         writer.writerow(row)
 
